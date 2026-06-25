@@ -3,7 +3,7 @@ const _ = require('lodash')
 const sanitize = require('sanitize-filename')
 const speechScorer = require('word-error-rate')
 const { IamAuthenticator } = require('ibm-watson/auth')
-const { SpeechConfig, SpeechSynthesisOutputFormat, OutputFormat, ResultReason, CancellationDetails, CancellationReason, CancellationErrorCode } = require('microsoft-cognitiveservices-speech-sdk')
+const { SpeechConfig, SpeechSynthesisOutputFormat, OutputFormat, PropertyId, ResultReason, CancellationDetails, CancellationReason, CancellationErrorCode } = require('microsoft-cognitiveservices-speech-sdk')
 
 const asJson = (str) => {
   if (str && _.isString(str)) {
@@ -127,6 +127,25 @@ const azureSpeechConfig = (req) => {
   throw new Error('Azure Subscription credentials not found')
 }
 
+// Apply a flat { propertyName: value } map onto an Azure SpeechConfig via setProperty().
+// SpeechConfig stores these in its internal (read-only) PropertyCollection, so they CANNOT be
+// applied via Object.assign — setProperty() is the only working path. Names matching a PropertyId
+// enum (e.g. 'Speech_SegmentationSilenceTimeoutMs', 'SpeechServiceConnection_EndSilenceTimeoutMs')
+// are resolved to the enum value; any other name is set as a raw string-named property.
+const applyAzureSpeechProperties = (speechConfig, properties) => {
+  if (!properties || typeof properties !== 'object') return
+  for (const key of Object.keys(properties)) {
+    const value = properties[key]
+    if (value === undefined || value === null) continue
+    const propId = PropertyId[key]
+    if (_.isNumber(propId)) {
+      speechConfig.setProperty(propId, String(value))
+    } else {
+      speechConfig.setProperty(key, String(value))
+    }
+  }
+}
+
 const applyExtraAzureSpeechConfig = (speechConfig, req) => {
   const extraAzureSpeechConfig = _.get(req, 'body.azure.config.speechConfig')
   if (extraAzureSpeechConfig) {
@@ -140,8 +159,16 @@ const applyExtraAzureSpeechConfig = (speechConfig, req) => {
         extraAzureSpeechConfig.outputFormat = OutputFormat[extraAzureSpeechConfig.outputFormat]
       }
     }
+    // A `properties` map can't go through Object.assign (read-only getter on SpeechConfig); pull it
+    // out and apply via setProperty() so callers can also nest it under config.speechConfig.
+    const nestedProperties = extraAzureSpeechConfig.properties
+    if (nestedProperties) delete extraAzureSpeechConfig.properties
     Object.assign(speechConfig, extraAzureSpeechConfig)
+    applyAzureSpeechProperties(speechConfig, nestedProperties)
   }
+  // Custom Azure SDK properties as a flat name->value map, e.g.
+  //   { "azure": { "config": { "properties": { "Speech_SegmentationSilenceTimeoutMs": "500" } } } }
+  applyAzureSpeechProperties(speechConfig, _.get(req, 'body.azure.config.properties'))
 }
 
 const getAzureErrorDetails = (result) => {
